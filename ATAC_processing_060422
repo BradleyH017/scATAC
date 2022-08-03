@@ -1,0 +1,87 @@
+# Bradley April 2022
+# Processing of scATAC files
+# Following https://gitlab.com/Grouumf/ATACdemultiplex/
+# Paper : https://www.sciencedirect.com/science/article/pii/S0092867421012794#sec4.1
+
+# Believe the raw data supplied by the authors (e.g GSM5589355_colon_sigmoid_SM-AZPYO_rep1_fragments)
+# has already gone through the processing of https://gitlab.com/Grouumf/ATACdemultiplex/-/blob/master/README.md
+# generating the aligned reads
+# Will try going ahead using this
+
+# 1. ~~~~~~~~~~~~~~~ Generating the coo matrix for each sample
+# For each sample need a list of unique cell barcodes
+cd /exports/igmm/eddie/CCGG-tumour-WGS/BradTemp/scATAC/data/temp
+source ../.bashrc
+for f in final_raw_temp*
+do
+echo $f
+awk '{print $4}' $f | sort | uniq > barcodes_$f.xgi
+done
+
+# NOTE: We want to generate a matrix that IS NOT binned yet. So we want to count peaks as they are found.
+# Believe part of the coo to sparse matrix section was bnning genomic regions and selecting for only fragments that fall within these peaks
+# From tutorial ATACMATUtils: 'It needs a list of cell IDs (-xgi) as input can optionaly accept a list of peaks as feature list (-xygi)'
+# Making this using the peaks from within each sample
+raw=GSM5589355_colon_sigmoid_SM-AZPYO_rep1_fragments.bed
+head GSM5589355_colon_sigmoid_SM-AZPYO_rep1_fragments.bed -n 10000 > test_rep1_fragments.bed
+f=test_rep1_fragments.bed
+delete=_rep1_fragments.bed
+sampname=${f[@]/$delete}
+echo $sampname
+peak_suff="_peaks.ygi"
+peak_f="${sampname}${peak_suff}"
+awk '{ print $1,$2,$3 }' $f > temp
+awk -v OFS="\t" '$1=$1' temp > $peak_f
+rm temp
+awk '{print $4}' $f | sort | uniq > barcodes_$f.xgi
+barcode_f="barcodes_${sampname}_rep1_fragments.bed.xgi"
+index_suff="_coo.bin.ygi"
+index_name="${sampname}${index_suff}"
+out_pref="sparse_matrix_"
+out_f="${out_pref}${sampname}.bed"
+ATACMatUtils -bin -bed $f -ygi $peak_f -xgi $barcode_f -out test_sparse.bed -ygi_out $index_name
+
+
+# No bin or count - Boolean matrix
+f=GSM5589355_colon_sigmoid_SM-AZPYO_rep1_fragments.bed
+delete=_rep1_fragments.bed
+sampname=${f[@]/$delete}
+echo $sampname
+index_suff="_coo.bin.ygi"
+index_name="${sampname}${index_suff}"
+barcode_f="barcodes_final_raw_temp_${sampname}_rep1_fragments.bed.xgi"
+newname="${sampname}${.test}"
+ATACMatUtils -bed $f -xgi $barcode_f -ygi ../resource_data/tss_annot.ygi --out $newname -ygi_out $index_name
+
+
+
+
+
+# Generate the coo matrix for each cell using gene coordinatesls
+module load igmm/apps/R/4.0.2
+for f in GSM55893*
+do
+delete=_rep1_fragments.bed
+sampname=${f[@]/$delete}
+echo $sampname
+index_suff="_coo.bin.ygi"
+index_name="${sampname}${index_suff}"
+barcode_f="barcodes_final_raw_temp_${sampname}_rep1_fragments.bed.xgi"
+ATACMatUtils -bed $f -xgi $barcode_f -out temp -ygi ../resource_data/tss_annot.ygi -ygi_out $index_name
+
+
+
+
+
+ATACMatUtils -count -bed $f -xgi $barcode_f -ygi $index_name  -out example.bed.reads_in_peaks
+
+
+
+
+ATACMatUtils -bed $f -bin -xgi $barcode_f -out temp -ygi_out $index_name
+echo "Done counting per cell"
+# Generate new file name
+newsuff=".mtx"
+newname="${sampname}${newsuff}"
+Rscript ../ATACdemultiplex/scripts/coo_to_R_sparse_matrix.R -x $bardcode_f --ygi ../resource_data/tss_annot.ygi --coo_matrix temp --out $newname
+done

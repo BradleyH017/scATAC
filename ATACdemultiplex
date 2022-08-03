@@ -1,0 +1,177 @@
+# Bradley March 2022
+# Processing of scATAC files
+# Following https://gitlab.com/Grouumf/ATACdemultiplex/
+# Paper : https://www.sciencedirect.com/science/article/pii/S0092867421012794#sec4.1
+
+# Download of ATACdemultiplex done using the authors code. See .bashrc
+# To load module
+cd /exports/igmm/eddie/CCGG-tumour-WGS/BradTemp/scATAC/data
+source .bashrc
+
+# Remove the last two columns of these files (believe one is the cluster, which I want to recompute)
+for f in *.bed
+do
+awk '!($6="")' $f > temp_$f
+done
+
+for f in temp_*
+do
+echo "$f"
+awk '!($5="")' $f > raw_$f
+done
+
+for f in raw_temp*
+do
+echo $f
+awk -v OFS="\t" '$1=$1' $f > final_$f
+done
+
+rm temp*
+rm raw_temp*
+
+######## 1.  Detect TSS
+# Download Transcription start site for all genes in GRCh38 (what is used in paper)
+cd resource_data
+wget https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_39/gencode.v39.basic.annotation.gtf.gz
+gunzip gencode.v39.basic.annotation.gtf.gz
+
+# Subset for genes
+awk '$3=="gene"' gencode.v39.basic.annotation.gtf > genes_only.gtf
+
+# Extract the gene names and add this to a new column to simplify
+awk '{ print $14 }' genes_only.gtf > gene_anno.gtf
+awk '{ print $1, $4, $5, $14 }' genes_only.gtf > temp.ygi
+awk -v OFS="\t" '$1=$1' temp.ygi > temp2.ygi
+sed 's/"//g' temp2.ygi > temp3.ygi
+awk '{gsub(/\"|\;/,"")}1' temp3.ygi > tss_annot.ygi
+rm temp*
+rm gene_anno.gtf
+
+# perform like the paper
+# Tn5 corrected insertions were aggregated ± 2000 bp relative (TSS strand-corrected) to each unique TSS genome wide.
+# Then this profile was normalized to the mean accessibility ± (1900 to 2000) bp from the TSS
+# smoothed every 11 bp.
+
+## Commented out ##
+## If computing per sample :
+## Output includes 'TSS region length: 2000 actual screening window size for TSS score: 3800' - Which is concordant with the paper mean accessibility
+#cd ..
+#for f in final_raw_temp*
+#do
+#echo $f
+#ATACCellTSS -bed $f -tss resource_data/tss_annot.ygi -smoothing 11
+#done
+
+
+# If computing per cell :
+# For each sample need a list of unique cell barcodes
+for f in final_raw_temp*
+do
+echo $f
+awk '{print $4}' $f | sort | uniq > barcodes_$f.xgi
+done
+
+
+# Now compute TSS per cell, within samples
+for f in final_raw_temp*
+do
+echo $f
+ATACCellTSS -bed $f -tss resource_data/tss_annot.ygi -xgi barcodes_$f.xgi -tss resource_data/tss_annot.ygi -smoothing 11
+done
+
+
+######## 2.  Combine the calls into a single sparse matrix - Initally done using cell ranger format so can use this for analysis if we would like
+## Commented this out as the other way works better
+#for f in final_raw_temp_*
+#do
+#delete=final_raw_temp_
+#newf=${f[@]/$delete}
+#echo $newf
+#ATACMatUtils -bed $f -ygi resource_data/tss_annot.ygi -xgi barcodes_$f.xgi -out cell_ranger_$newf -format cellRanger
+#pref="cell_ranger_"
+#dir="${pref}${newf}"
+#newdir="${dir%.*}"
+#cd $newdir
+#gunzip *
+#cd ..
+#done
+## This means we have to generalise to genes, want to keep peaks for now, so using a coo works better
+
+
+# What if we don't want to generalise to genes - need to align using coo format and also generate the indeces file
+for f in final_raw_temp_*
+do
+delete=final_raw_temp_
+newf=${f[@]/$delete}
+echo $newf
+sampname="${newf%.*}"
+index_suff="_coo.bin.ygi"
+index_name="${sampname}${index_suff}"
+ATACMatUtils -bed $f -bin -xgi barcodes_$f.xgi -out temp -ygi_out $index_name
+echo "Done counting per cell"
+# Generate new file name
+newsuff=".mtx"
+newname="${sampname}${newsuff}"
+Rscript ATACdemultiplex/scripts/coo_to_R_sparse_matrix.R --xgi barcodes_$f.xgi --ygi resource_data/tss_annot.ygi --coo_matrix temp --out $newname
+done
+
+# Remove temp file
+rm temp
+
+# Move the useful files into a directory
+#mkdir processed
+mv *.mtx processed
+mv *coo.bin.ygi processed
+
+
+# Finally, make a fragments file
+# https://support.10xgenomics.com/single-cell-atac/software/pipelines/latest/output/fragments
+# Believe this is the ORIGINAL bed file for each sample (although not sure what the last column represents)
+
+# Submit this as a job - see gen_fragments.sh script
+####### Start of script
+# !/bin/bash
+#$ -S /bin/bash
+#$ -cwd
+#$ -l h_rt=24:00:00
+#$ -l h_vmem=30G
+#$ -N making_fragments
+#$ -M bradley.harris@ed.ac.uk
+#$ -m baes
+#$ -t 1-7
+
+# Load modules
+. /etc/profile.d/modules.sh
+module load igmm/apps/bcftools/1.9
+
+# cd
+cd /exports/igmm/eddie/CCGG-tumour-WGS/BradTemp/scATAC/data
+
+# Load the sample
+SAMPLIST=samples.txt
+sampname=`head -n $SGE_TASK_ID $SAMPLIST | tail -n 1 | awk '{ print $1 }'`
+echo $sampname
+
+# Remove last col
+awk '!($6="")' $sampname > $sampname.2.bed
+
+# Sort the file based on coordinate
+sort -k 1,1 -k 2,2n -k 3,3n $sampname.2.bed > sorted.$sampname.2.bed
+echo "sorted"
+
+# tab delim
+newpre="frags_"
+newname="${newpre}${sampname}"
+awk -v OFS="\t" '$1=$1' sorted.$sampname.2.bed > $newname
+echo"tabbed"
+
+# bgzip
+bgzip $newname
+echo "zipped"
+
+# index
+tabix $newname.gz
+echo "indexed"
+
+######## End of script
+rm sorted* making_fragments* *2.bed
